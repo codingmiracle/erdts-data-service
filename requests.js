@@ -27,7 +27,7 @@ fetch('http://127.0.0.1:3001/start-session', {
         "Content-type": "application/json"
     },
     body: JSON.stringify({
-        "token": "tdwmj"
+        "token": "CwWXN"
     })
 })
 .then(function(response) {

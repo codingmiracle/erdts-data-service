@@ -2,6 +2,8 @@ const { SerialPort, PacketLengthParser } = require("serialport");
 const crypto = require("crypto");
 
 class Session {
+    okFlag = "sessionOk"
+    endFlag = "sessionEND"
 
     constructor(config) {
         this.port = new SerialPort({
@@ -16,68 +18,77 @@ class Session {
             maxLen: 1024
         }));
 
-        this.data = new Array();
-    }
-
-    start(token) {
-
         const original_iv = [0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00];
-
-        const aes_ctx = {
+        this.aes_ctx = {
             algorithm: 'aes-256-cbc',
-            key: crypto.createHash('sha256').update(token).digest(),
+            key: null,
             iv: Buffer.from(original_iv),
             sessionKey: null
         };
 
-        console.log(aes_ctx);
+        this.onData = null;
+    }
+
+    decrypt(data) {
+        let decipher = crypto.createDecipheriv(this.aes_ctx.algorithm, this.aes_ctx.key, this.aes_ctx.iv);
+        decipher.setAutoPadding(false);
+        let decryptedMessage = decipher.update(data);
+        decryptedMessage += decipher.final();
+        return decryptedMessage
+    }
+
+    encrypt(data) {
+        let cipher = crypto.createCipheriv(this.aes_ctx.algorithm, this.aes_ctx.key, this.aes_ctx.ivv);
+        let cipherText = cipher.update(this.okFlag);
+        cipherText = Buffer.concat([data, cipher.final()]);
+        return cipherText
+    }
+
+    start(token) {
+        this.aes_ctx.key = crypto.createHash('sha256').update(token).digest()
+        console.log(this.aes_ctx);
         this.port.on('error', console.log);
         this.port.open();
 
         this.parser.on('data', data => {
             let plaintext = data.slice(3, data.length);
-            console.log("plaintext:", plaintext);
-
-            if (aes_ctx.sessionKey == null) {
+            if (this.aes_ctx.sessionKey == null) {
                 console.log("initializing Session:");
-                let decipher = crypto.createDecipheriv(aes_ctx.algorithm, aes_ctx.key, aes_ctx.iv);
-                decipher.setAutoPadding(false);
-                let sessionIv = decipher.update(plaintext);
-                sessionIv += decipher.final();
+                let sessionIv = this.decrypt(plaintext);
                 console.log("sessionIv:", sessionIv);
-
                 //generate Sessionkey
-                let b = Buffer.concat([aes_ctx.key, Buffer.from(sessionIv)]);
-                aes_ctx.sessionKey = crypto.createHash('sha256').update(b).digest();
-                console.log("SessionKey:", aes_ctx.sessionKey);
-
-                //send OK Flag
-                let cipher = crypto.createCipheriv(aes_ctx.algorithm, aes_ctx.sessionKey, aes_ctx.iv);
-                let cipherText = cipher.update("OK");
-                cipherText = Buffer.from(cipherText + cipher.final());
-                console.log("encryptedMessage:", cipherText);
-                this.port.write(cipherText);
+                let b = Buffer.concat([this.aes_ctx.key, Buffer.from(sessionIv)]);
+                this.aes_ctx.sessionKey = crypto.createHash('sha256').update(b).digest();
+                console.log("SessionKey:", this.aes_ctx.sessionKey);
+                this.port.write(this.encrypt(this.okFlag));
             } else {
-                let decipher = crypto.createDecipheriv(aes_ctx.algorithm, aes_ctx.sessionKey, aes_ctx.iv);
-                decipher.setAutoPadding(false);
-                let decryptedMessage = decipher.update(plaintext);
-                decryptedMessage += decipher.final();
-                console.log("decryptedMessage:", decryptedMessage);
-
-                this.data.push(decryptedMessage);
+                decryptedMessage = this.decrypt(plaintext);
+                if (decryptedMessage == this.endFlag) {
+                    this.aes_ctx.sessionKey = null;
+                    console.log("quit Session");
+                } else {
+                    if (this.onData != null) {
+                        this.onData(decryptedMessage);
+                    } else {
+                        console.log(decryptedMessage);
+                    }
+                }
             }
         });
-        
+
     }
 
     close() {
-        if(this.port.isOpen) {
-            // send close Flag
+        if (this.port.isOpen) {
+            this.port.write(this.encrypt(this.endFlag));
+            this.aes_ctx.sessionKey = null;
             this.port.close();
-            this.parser.removeAllListeners();
+            for (listener in this.parser.listeners('data')) {
+                this.parser.removeListener('data');
+            }
         }
     }
 
